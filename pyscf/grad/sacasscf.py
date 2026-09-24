@@ -27,6 +27,7 @@ from pyscf.grad.mp2 import _shell_prange
 from pyscf.mcscf import mc1step, mc1step_symm, newton_casscf
 from pyscf.grad import casscf as casscf_grad
 from pyscf.grad import rhf as rhf_grad
+from pyscf.grad.deriv_eri import int2e_ip1, deriv_eri_kwargs
 from pyscf.fci.direct_spin1 import _unpack_nelec
 from pyscf.fci.addons import fix_spin_, SpinPenaltyFCISolver
 from pyscf.fci.spin_op import spin_square
@@ -36,8 +37,13 @@ from pyscf import lib, ao2mo, mcscf
 
 # ref. Mol. Phys., 99, 103 (2001); DOI: 10.1080/002689700110005642
 
+# pyscf.df.grad.sacasscf swaps its own kernels in over this module's globals
+# and never evaluates (nabla i,j|k,l) at all, so those must keep working with
+# the signatures they already have.
+_deriv_eri_kwargs = deriv_eri_kwargs
+
 def Lorb_dot_dgorb_dx (Lorb, mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=None, eris=None,
-                       verbose=None):
+                       verbose=None, deriv_eri=None):
     ''' Modification of single-state CASSCF electronic energy nuclear gradient to compute instead
     the orbital Lagrange term nuclear gradient:
 
@@ -58,6 +64,7 @@ def Lorb_dot_dgorb_dx (Lorb, mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=No
     if mf_grad is None: mf_grad = mc._scf.nuc_grad_method()
     if mc.frozen is not None:
         raise NotImplementedError
+    if deriv_eri is None: deriv_eri = int2e_ip1
 
     mol = mc.mol
     ncore = mc.ncore
@@ -186,8 +193,7 @@ def Lorb_dot_dgorb_dx (Lorb, mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=No
             dm2_ao += lib.einsum('ijw,pi,qj->pqw', dm2buf, moL_cas[p0:p1], mo_cas[q0:q1])
             dm2_ao += lib.einsum('ijw,pi,qj->pqw', dm2buf, mo_cas[p0:p1], moL_cas[q0:q1])
             shls_slice = (shl0,shl1,b0,b1,0,mol.nbas,0,mol.nbas)
-            eri1 = mol.intor('int2e_ip1', comp=3, aosym='s2kl',
-                             shls_slice=shls_slice).reshape(3,p1-p0,nf,nao_pair)
+            eri1 = deriv_eri(mol, shls_slice).reshape(3,p1-p0,nf,nao_pair)
             # MRH: I still don't understand why there is a minus here!
             de_eri[k] -= np.einsum('xijw,ijw->x', eri1, dm2_ao) * 2
             eri1 = dm2_ao = None
@@ -213,7 +219,7 @@ def Lorb_dot_dgorb_dx (Lorb, mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=No
     return de
 
 def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=None,
-                     eris=None, verbose=None):
+                     eris=None, verbose=None, deriv_eri=None):
     ''' Modification of single-state CASSCF electronic energy nuclear gradient to compute instead
     the CI Lagrange term nuclear gradient:
 
@@ -230,6 +236,7 @@ def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_g
     if mf_grad is None: mf_grad = mc._scf.nuc_grad_method()
     if mc.frozen is not None:
         raise NotImplementedError
+    if deriv_eri is None: deriv_eri = int2e_ip1
 
     t0 = (logger.process_clock(), logger.perf_counter())
     mol = mc.mol
@@ -314,8 +321,7 @@ def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_g
             q0, q1 = q1, q1 + nf
             dm2_ao = lib.einsum('ijw,pi,qj->pqw', dm2buf, mo_cas[p0:p1], mo_cas[q0:q1])
             shls_slice = (shl0,shl1,b0,b1,0,mol.nbas,0,mol.nbas)
-            eri1 = mol.intor('int2e_ip1', comp=3, aosym='s2kl',
-                             shls_slice=shls_slice).reshape(3,p1-p0,nf,nao_pair)
+            eri1 = deriv_eri(mol, shls_slice).reshape(3,p1-p0,nf,nao_pair)
             de_eri[k] -= np.einsum('xijw,ijw->x', eri1, dm2_ao) * 2
             eri1 = dm2_ao = None
             t0 = logger.timer (mc, f'SA-CASSCF Lci_dot_dgci atom {ia} ({p1-p0},{nf}|{nao_pair})', *t0)
@@ -403,7 +409,7 @@ class Gradients (lagrange.Gradients):
         'ngorb', 'nroots', 'spin_states', 'na_states', 'nb_states', 'nci', 'state',
         'eris', 'weights', 'e_states', 'max_cycle', 'ncas','e_cas', 'nelecas',
         'mo_occ', 'mo_energy', 'mo_coeff', 'callback', 'chkfile', 'nlag', 'frozen',
-        'level_shift', 'extrasym', 'fcisolver',
+        'level_shift', 'extrasym', 'fcisolver', 'deriv_eri',
     }
 
     def __init__(self, mc, state=None):
@@ -435,6 +441,9 @@ class Gradients (lagrange.Gradients):
         else:
             self.state = None
         self.eris = None
+        # Provider for the AO derivative integrals, held the way eris is so
+        # that reuse survives across kernel calls. None: evaluate on the fly.
+        self.deriv_eri = None
         self.weights = np.array ([1])
         try:
             self.e_states = np.asarray (mc.e_states)
@@ -560,7 +569,11 @@ class Gradients (lagrange.Gradients):
         return fcasscf
 
     def kernel (self, state=None, atmlst=None, verbose=None, mo=None, ci=None, eris=None,
-                mf_grad=None, e_states=None, level_shift=None, **kwargs):
+                mf_grad=None, e_states=None, level_shift=None, deriv_eri=None, **kwargs):
+        if deriv_eri is None:
+            deriv_eri = self.deriv_eri
+        else:
+            self.deriv_eri = deriv_eri
         if ci is None:
             if self.base.ci is None:
                 self.base.run()
@@ -574,7 +587,8 @@ class Gradients (lagrange.Gradients):
         if mf_grad is None: mf_grad = self.base._scf.nuc_grad_method ()
         if state is None:
             return casscf_grad.Gradients (self.base).kernel (
-                mo_coeff=mo, ci=ci, atmlst=atmlst, verbose=verbose)
+                mo_coeff=mo, ci=ci, atmlst=atmlst, verbose=verbose,
+                **_deriv_eri_kwargs (deriv_eri))
         if e_states is None:
             try:
                 e_states = self.e_states = np.asarray (self.base.e_states)
@@ -583,7 +597,8 @@ class Gradients (lagrange.Gradients):
         if level_shift is None: level_shift=self.level_shift
         return lagrange.Gradients.kernel (
             self, state=state, atmlst=atmlst, verbose=verbose, mo=mo, ci=ci, eris=eris,
-            mf_grad=mf_grad, e_states=e_states, level_shift=level_shift, **kwargs)
+            mf_grad=mf_grad, e_states=e_states, level_shift=level_shift,
+            deriv_eri=deriv_eri, **kwargs)
 
     def get_wfn_response (self, atmlst=None, state=None, verbose=None, mo=None, ci=None,
                           eris=None, **kwargs):
@@ -627,7 +642,7 @@ class Gradients (lagrange.Gradients):
         return self.project_Aop (Aop, ci, state), Adiag
 
     def get_ham_response (self, state=None, atmlst=None, verbose=None, mo=None, ci=None, eris=None,
-                          mf_grad=None, **kwargs):
+                          mf_grad=None, deriv_eri=None, **kwargs):
         if state is None: state = self.state
         if atmlst is None: atmlst = self.atmlst
         if verbose is None: verbose = self.verbose
@@ -641,10 +656,11 @@ class Gradients (lagrange.Gradients):
         # Mute some misleading messages
         fcasscf_grad._finalize = lambda: None
         return fcasscf_grad.kernel (mo_coeff=mo, ci=ci[state], atmlst=atmlst,
-                                    verbose=verbose, eris=eris)
+                                    verbose=verbose, eris=eris,
+                                    **_deriv_eri_kwargs (deriv_eri))
 
     def get_LdotJnuc (self, Lvec, state=None, atmlst=None, verbose=None, mo=None, ci=None,
-                      eris=None, mf_grad=None, **kwargs):
+                      eris=None, mf_grad=None, deriv_eri=None, **kwargs):
         if state is None: state = self.state
         if atmlst is None: atmlst = self.atmlst
         if verbose is None: verbose = self.verbose
@@ -665,7 +681,8 @@ class Gradients (lagrange.Gradients):
         # CI part
         t0 = (logger.process_clock(), logger.perf_counter())
         de_Lci = Lci_dot_dgci_dx(Lci, self.weights, self.base, mo_coeff=mo, ci=ci,
-                                 atmlst=atmlst, mf_grad=mf_grad, eris=eris, verbose=verbose)
+                                 atmlst=atmlst, mf_grad=mf_grad, eris=eris, verbose=verbose,
+                                 **_deriv_eri_kwargs (deriv_eri))
         logger.info (self, '--------------- %s gradient Lagrange CI response ---------------',
                      self.base.__class__.__name__)
         if verbose >= logger.INFO: rhf_grad._write(self, self.mol, de_Lci, atmlst)
@@ -674,7 +691,8 @@ class Gradients (lagrange.Gradients):
 
         # Orb part
         de_Lorb = Lorb_dot_dgorb_dx(Lorb, self.base, mo_coeff=mo, ci=ci,
-                                    atmlst=atmlst, mf_grad=mf_grad, eris=eris, verbose=verbose)
+                                    atmlst=atmlst, mf_grad=mf_grad, eris=eris, verbose=verbose,
+                                    **_deriv_eri_kwargs (deriv_eri))
         logger.info (self, '--------------- %s gradient Lagrange orbital response ---------------',
                      self.base.__class__.__name__)
         if verbose >= logger.INFO: rhf_grad._write(self, self.mol, de_Lorb, atmlst)

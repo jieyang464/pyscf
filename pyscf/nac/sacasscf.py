@@ -45,7 +45,7 @@ def grad_elec_core(mc_grad, mo_coeff=None, atmlst=None, eris=None, mf_grad=None)
     return de
 
 def grad_elec_active (mc_grad, mo_coeff=None, ci=None, atmlst=None,
-                      eris=None, mf_grad=None, verbose=None):
+                      eris=None, mf_grad=None, verbose=None, deriv_eri=None):
     '''Compute the active-electron part of the CASSCF (Hellmann-Feynman)
     gradient by subtracting the core-electron part.'''
     t0 = (logger.process_clock (), logger.perf_counter ())
@@ -53,7 +53,8 @@ def grad_elec_active (mc_grad, mo_coeff=None, ci=None, atmlst=None,
     log = logger.new_logger (mc_grad, verbose)
     if mf_grad is None: mf_grad=mc._scf.nuc_grad_method ()
     de = mc_grad.grad_elec (mo_coeff=mo_coeff, ci=ci, atmlst=atmlst,
-                            verbose=0)
+                            verbose=0,
+                            **sacasscf_grad._deriv_eri_kwargs (deriv_eri))
     de -= grad_elec_core (mc_grad, mo_coeff=mo_coeff, atmlst=atmlst,
                           eris=eris, mf_grad=mf_grad)
     log.debug (f'CASSCF active-orbital gradient:\n{de}')
@@ -198,7 +199,7 @@ class NonAdiabaticCouplings (sacasscf_grad.Gradients):
 
 
     def get_ham_response (self, state=None, atmlst=None, verbose=None, mo=None,
-                          ci=None, eris=None, mf_grad=None, **kwargs):
+                          ci=None, eris=None, mf_grad=None, deriv_eri=None, **kwargs):
         if state is None: state = self.state
         if atmlst is None: atmlst = self.atmlst
         if verbose is None: verbose = self.verbose
@@ -213,7 +214,8 @@ class NonAdiabaticCouplings (sacasscf_grad.Gradients):
         ket, bra = _unpack_state (state)
         fcasscf_grad = casscf_grad.Gradients (self.make_fcasscf_nacs (state))
         nac = grad_elec_active (fcasscf_grad, mo_coeff=mo, ci=ci[ket],
-                                eris=eris, atmlst=atmlst, verbose=verbose)
+                                eris=eris, atmlst=atmlst, verbose=verbose,
+                                deriv_eri=deriv_eri)
         if not use_etfs: nac += self.nac_csf (
             mo_coeff=mo, ci=ci, state=state, mf_grad=mf_grad, atmlst=atmlst)
         return nac

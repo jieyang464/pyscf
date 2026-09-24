@@ -36,11 +36,17 @@ from pyscf import ao2mo
 from pyscf.lib import logger
 from pyscf.grad import casci as casci_grad
 from pyscf.grad import rhf as rhf_grad
+from pyscf.grad.deriv_eri import int2e_ip1
 from pyscf.grad.mp2 import _shell_prange
 from pyscf.mcscf.addons import StateAverageMCSCFSolver
 
-def grad_elec(mc_grad, mo_coeff=None, ci=None, atmlst=None, verbose=None, eris=None):
+def grad_elec(mc_grad, mo_coeff=None, ci=None, atmlst=None, verbose=None, eris=None,
+              deriv_eri=None):
     mc = mc_grad.base
+    # deriv_eri: how the (nabla i,j|k,l) blocks below are obtained.  The
+    # default evaluates each one on the fly and drops it; see
+    # pyscf.grad.deriv_eri for a provider that keeps them instead.
+    if deriv_eri is None: deriv_eri = int2e_ip1
     if mo_coeff is None: mo_coeff = mc.mo_coeff
     if ci is None: ci = mc.ci
     if mc.frozen is not None:
@@ -126,8 +132,7 @@ def grad_elec(mc_grad, mo_coeff=None, ci=None, atmlst=None, verbose=None, eris=N
             q0, q1 = q1, q1 + nf
             dm2_ao = lib.einsum('ijw,pi,qj->pqw', dm2buf, mo_cas[p0:p1], mo_cas[q0:q1])
             shls_slice = (shl0,shl1,b0,b1,0,mol.nbas,0,mol.nbas)
-            eri1 = mol.intor('int2e_ip1', comp=3, aosym='s2kl',
-                             shls_slice=shls_slice).reshape(3,p1-p0,nf,nao_pair)
+            eri1 = deriv_eri(mol, shls_slice).reshape(3,p1-p0,nf,nao_pair)
             de[k] -= numpy.einsum('xijw,ijw->x', eri1, dm2_ao) * 2
             eri1 = None
         de[k] += numpy.einsum('xij,ij->x', vhf1c[:,p0:p1], dm1[p0:p1]) * 2
@@ -190,10 +195,22 @@ class CASSCF_GradScanner(lib.GradScanner):
 class Gradients(casci_grad.Gradients):
     '''Non-relativistic restricted Hartree-Fock gradients'''
 
+    _keys = {'deriv_eri'}
+
+    # Provider for the AO derivative integrals, kept on the object the way
+    # eris is, so that reuse survives from one kernel call to the next.
+    # None means evaluate them on the fly, as PySCF always has.
+    deriv_eri = None
+
     grad_elec = grad_elec
 
-    def kernel(self, mo_coeff=None, ci=None, atmlst=None, verbose=None, eris=None):
+    def kernel(self, mo_coeff=None, ci=None, atmlst=None, verbose=None, eris=None,
+               deriv_eri=None):
         log = logger.new_logger(self, verbose)
+        if deriv_eri is None:
+            deriv_eri = self.deriv_eri
+        else:
+            self.deriv_eri = deriv_eri
         if ci is None:
             if self.base.ci is None:
                 self.base.run()
@@ -209,7 +226,7 @@ class Gradients(casci_grad.Gradients):
         if self.verbose >= logger.INFO:
             self.dump_flags()
 
-        de = self.grad_elec(mo_coeff, ci, atmlst, log, eris=eris)
+        de = self.grad_elec(mo_coeff, ci, atmlst, log, eris=eris, deriv_eri=deriv_eri)
         self.de = de = de + self.grad_nuc(atmlst=atmlst)
         if self.mol.symmetry:
             self.de = self.symmetrize(self.de, atmlst)
