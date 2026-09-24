@@ -42,10 +42,10 @@ def int2e_ip1(mol, shls_slice=None):
 def deriv_eri_kwargs (deriv_eri):
     '''Forward a provider only when one was given.
 
-    pyscf.df.grad.sacasscf swaps its own Lagrange kernels in over the ones in
-    pyscf.grad.sacasscf, and those never evaluate (nabla i,j|k,l).  Passing
-    ``deriv_eri=None`` down to them would be a TypeError on a call that opted
-    into nothing, so the keyword is only added once there is something to say.
+    Several kernels reached through these ones are overridden by subclasses or
+    by sibling modules that predate the provider.  Passing ``deriv_eri=None``
+    down to one of those would be a TypeError on a call that opted into
+    nothing, so the keyword is only added once there is something to say.
     '''
     return {} if deriv_eri is None else {'deriv_eri': deriv_eri}
 
@@ -79,6 +79,10 @@ class DerivativeERICache:
         self.mol = None
         self.eri1 = None      # (3,nao,nao,nao_pair), or None when not cached
         self.ao_loc = None
+        # DF 3-center tensors for _int3c_mols = (mol, auxmol), keyed by
+        # (intor, aosym); None records that one was too big to keep.
+        self._int3c = {}
+        self._int3c_mols = None
 
     def build(self, mol):
         '''Evaluate and keep the whole derivative ERI for ``mol``, unless that
@@ -108,3 +112,56 @@ class DerivativeERICache:
         shl0, shl1, b0, b1 = shls_slice[:4]
         ao_loc = self.ao_loc
         return self.eri1[:, ao_loc[shl0]:ao_loc[shl1], ao_loc[b0]:ao_loc[b1], :]
+
+    def wrap_int3c(self, get_int3c, mol, auxmol, intor, aosym, nbytes):
+        '''Wrap a ``pyscf.df.grad.rhf._int3c_wrapper`` callable so that the
+        whole 3-center tensor is evaluated once and later blocks are cut out of
+        it, the way :meth:`__call__` does for the 4-center one.
+
+        Density fitting never forms (nabla i,j|k,l); it differentiates the
+        3-center (i,j|P) instead.  That is the same reuse opportunity in a much
+        cheaper shape: 3*nao**2*naux rather than 3*nao**2*nao_pair, so O(nao**3)
+        against O(nao**4).  The DF gradient blocks over the auxiliary index with
+        the bra pair spanning the whole basis, which makes a served block a
+        contiguous trailing slice and therefore a view.
+
+        One provider holds the several tensors a DF gradient asks for, one per
+        (intor, aosym), all for the same ``mol`` and ``auxmol``.
+        '''
+        nbas = mol.nbas
+        aux_loc = auxmol.ao_loc
+        def cached(shls_slice=None):
+            # Only an aux-blocked slice over the full bra pair lives inside the
+            # stored tensor; anything else is evaluated as it always was.
+            if shls_slice is not None and tuple(shls_slice[:4]) != (0, nbas, 0, nbas):
+                return get_int3c(shls_slice)
+            full = self._int3c_full(get_int3c, mol, auxmol, (intor, aosym), nbytes)
+            if full is None:
+                return get_int3c(shls_slice)
+            if shls_slice is None:
+                return full
+            return full[..., aux_loc[shls_slice[4]]:aux_loc[shls_slice[5]]]
+        return cached
+
+    def _int3c_full(self, get_int3c, mol, auxmol, key, nbytes):
+        '''The whole tensor for ``key``, evaluated on first ask and kept, or
+        None when keeping it would exceed ``max_memory``.'''
+        # Valid at one geometry and one fitting basis only.  The molecules are
+        # held, not just compared by id, so a new geometry can never be served
+        # a tensor left over from the last one; it empties the store instead.
+        if self._int3c_mols is None or not (self._int3c_mols[0] is mol and
+                                            self._int3c_mols[1] is auxmol):
+            self._int3c = {}
+            self._int3c_mols = (mol, auxmol)
+        store = self._int3c
+        if key in store:
+            return store[key]
+        used = sum(t.nbytes for t in store.values() if t is not None)
+        if used + nbytes > self.max_memory * 1e6:
+            logger.debug1(mol, 'DerivativeERICache not storing %s: needs '
+                          '%.0f MB on top of %.0f MB held, max_memory %.0f MB',
+                          key[0], nbytes/1e6, used/1e6, self.max_memory)
+            store[key] = None
+            return None
+        store[key] = get_int3c()
+        return store[key]

@@ -39,8 +39,14 @@ from pyscf.df.grad.casdm2_util import (solve_df_rdm2,
                                       grad_elec_dferi,
                                       grad_elec_auxresponse_dferi)
 
+# Both Lagrange kernels below are swapped in over pyscf.grad.sacasscf's
+# globals.  Density fitting differentiates the 3-center (i,j|P) rather than
+# forming (nabla i,j|k,l), so a deriv_eri provider handed down reaches them
+# through grad_elec_dferi and the SCF gradient's get_jk instead (see
+# pyscf.df.grad.rhf._cached_int3c).
+
 def Lorb_dot_dgorb_dx (Lorb, mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=None, eris=None, verbose=None,
-                       auxbasis_response=True):
+                       auxbasis_response=True, deriv_eri=None):
     ''' Modification of pyscf.grad.casscf.kernel to compute instead the orbital
     Lagrange term nuclear gradient (sum_pq Lorb_pq d2_Ecas/d_lambda d_kpq)
     This involves removing nuclear-nuclear terms and making the substitution
@@ -56,6 +62,9 @@ def Lorb_dot_dgorb_dx (Lorb, mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=No
     if mo_coeff is None: mo_coeff = mc.mo_coeff
     if ci is None: ci = mc.ci
     if mf_grad is None: mf_grad = dfrhf_grad.Gradients (mc._scf)
+    # The SCF gradient is built fresh here, so the provider has to be put on
+    # it explicitly; it is not the object the caller set deriv_eri on.
+    if deriv_eri is not None: mf_grad.deriv_eri = deriv_eri
     if mc.frozen is not None:
         raise NotImplementedError
 
@@ -156,16 +165,17 @@ def Lorb_dot_dgorb_dx (Lorb, mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=No
     # grad_elec_dferi is explicitly symmetrized wrt AOs.
     # If this fails I can always debug it by kludging ncore, ncas -> 0, nmo
     dfcasdm2  = solve_df_rdm2 (mc, mo_cas=(mo_cas, moL_cas), casdm2=casdm2)
-    de_eri += grad_elec_dferi (mc, mo_cas=mo_cas, dfcasdm2=dfcasdm2, atmlst=atmlst, max_memory=mc.max_memory)[0]
+    de_eri += grad_elec_dferi (mc, mo_cas=mo_cas, dfcasdm2=dfcasdm2, atmlst=atmlst, max_memory=mc.max_memory,
+                                deriv_eri=deriv_eri)[0]
     if auxbasis_response:
         de_aux += grad_elec_auxresponse_dferi (mc, mo_cas=mo_cas, dfcasdm2=dfcasdm2, atmlst=atmlst,
-                                               max_memory=mc.max_memory)[0]
+                                               max_memory=mc.max_memory, deriv_eri=deriv_eri)[0]
     dfcasdm2  = solve_df_rdm2 (mc, mo_cas=mo_cas, casdm2=casdm2)
     de_eri += grad_elec_dferi (mc, mo_cas=(mo_cas, moL_cas), dfcasdm2=dfcasdm2, atmlst=atmlst,
-                               max_memory=mc.max_memory)[0]
+                               max_memory=mc.max_memory, deriv_eri=deriv_eri)[0]
     if auxbasis_response:
         de_aux += grad_elec_auxresponse_dferi (mc, mo_cas=(mo_cas, moL_cas), dfcasdm2=dfcasdm2, atmlst=atmlst,
-                                               max_memory=mc.max_memory)[0]
+                                               max_memory=mc.max_memory, deriv_eri=deriv_eri)[0]
     dfcasdm2 = casdm2 = None
 
     for k, ia in enumerate(atmlst):
@@ -196,7 +206,7 @@ def Lorb_dot_dgorb_dx (Lorb, mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=No
     return de
 
 def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=None, eris=None, verbose=None,
-                     auxbasis_response=True):
+                     auxbasis_response=True, deriv_eri=None):
     ''' Modification of pyscf.grad.casscf.kernel to compute instead the CI
     Lagrange term nuclear gradient (sum_IJ Lci_IJ d2_Ecas/d_lambda d_PIJ)
     This involves removing all core-core and nuclear-nuclear terms and making the substitution
@@ -206,6 +216,9 @@ def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_g
     if mo_coeff is None: mo_coeff = mc.mo_coeff
     if ci is None: ci = mc.ci
     if mf_grad is None: mf_grad = dfrhf_grad.Gradients (mc._scf)
+    # The SCF gradient is built fresh here, so the provider has to be put on
+    # it explicitly; it is not the object the caller set deriv_eri on.
+    if deriv_eri is not None: mf_grad.deriv_eri = deriv_eri
     if mc.frozen is not None:
         raise NotImplementedError
 
@@ -267,10 +280,10 @@ def Lci_dot_dgci_dx (Lci, weights, mc, mo_coeff=None, ci=None, atmlst=None, mf_g
 
     dfcasdm2 = casdm2 = solve_df_rdm2 (mc, mo_cas=mo_cas, casdm2=casdm2)
     de_eri = grad_elec_dferi (mc, mo_cas=mo_cas, dfcasdm2=dfcasdm2, atmlst=atmlst,
-        max_memory=mc.max_memory)[0]
+        max_memory=mc.max_memory, deriv_eri=deriv_eri)[0]
     if auxbasis_response:
         de_aux += grad_elec_auxresponse_dferi (mc, mo_cas=mo_cas, dfcasdm2=dfcasdm2,
-            atmlst=atmlst, max_memory=mc.max_memory)[0]
+            atmlst=atmlst, max_memory=mc.max_memory, deriv_eri=deriv_eri)[0]
     dfcasdm2 = casdm2 = None
 
     t0 = lib.logger.timer (mc, 'SA-CASSCF Lci_dot_dgci 1-electron part', *t0)

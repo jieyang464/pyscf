@@ -121,7 +121,7 @@ def get_jk(mf_grad, mol=None, dm=None, hermi=0, with_j=True, with_k=True,
     t1 = (logger.process_clock (), logger.perf_counter ())
     vj = numpy.zeros((nset,3,nao,nao))
     vk = numpy.zeros((nset,3,nao,nao))
-    get_int3c_ip1 = _int3c_wrapper(mol, auxmol, 'int3c2e_ip1', 's1')
+    get_int3c_ip1 = _cached_int3c(getattr(mf_grad, 'deriv_eri', None), mol, auxmol, 'int3c2e_ip1', 's1')
     max_memory = mf_grad.max_memory - lib.current_memory()[0]
     blksize = int(min(max(max_memory * .5e6/8 / (nao**2*3), 20), naux, 240))
     ao_ranges = balance_partition(aux_loc, blksize)
@@ -184,7 +184,7 @@ def get_jk(mf_grad, mol=None, dm=None, hermi=0, with_j=True, with_k=True,
     vkaux = numpy.zeros((nset,nset,3,naux))
     # (i,j|d/dX P)
     t2 = t1
-    get_int3c_ip2 = _int3c_wrapper(mol, auxmol, 'int3c2e_ip2', 's2ij')
+    get_int3c_ip2 = _cached_int3c(getattr(mf_grad, 'deriv_eri', None), mol, auxmol, 'int3c2e_ip2', 's2ij')
     fmmm = _ao2mo.libao2mo.AO2MOmmm_bra_nr_s2 # MO output index slower than AO output index; input AOs are symmetric
     fdrv = _ao2mo.libao2mo.AO2MOnr_e2_drv # comp and aux indices are slower
     ftrans = _ao2mo.libao2mo.AO2MOtranse2_nr_s2 # input is tril_packed
@@ -254,9 +254,9 @@ def get_j(mf_grad, mol=None, dm=None, hermi=0):
         auxmol = df.addons.make_auxmol(with_df.mol, with_df.auxbasis)
     nbas = mol.nbas
 
-    get_int3c_s2 = _int3c_wrapper(mol, auxmol, 'int3c2e', 's2ij')
-    get_int3c_ip1 = _int3c_wrapper(mol, auxmol, 'int3c2e_ip1', 's1')
-    get_int3c_ip2 = _int3c_wrapper(mol, auxmol, 'int3c2e_ip2', 's2ij')
+    get_int3c_s2 = _cached_int3c(getattr(mf_grad, 'deriv_eri', None), mol, auxmol, 'int3c2e', 's2ij')
+    get_int3c_ip1 = _cached_int3c(getattr(mf_grad, 'deriv_eri', None), mol, auxmol, 'int3c2e_ip1', 's1')
+    get_int3c_ip2 = _cached_int3c(getattr(mf_grad, 'deriv_eri', None), mol, auxmol, 'int3c2e_ip2', 's2ij')
 
     nao = mol.nao
     naux = auxmol.nao
@@ -329,6 +329,24 @@ def get_j(mf_grad, mol=None, dm=None, hermi=0):
 
     logger.timer(mf_grad, 'df vj', *t0)
     return vj
+
+def _cached_int3c(deriv_eri, mol, auxmol, intor, aosym):
+    '''``_int3c_wrapper``, served out of ``deriv_eri`` when one is given.
+
+    Density fitting differentiates the 3-center (i,j|P) rather than forming
+    (nabla i,j|k,l), so it reuses a provider through this instead of through
+    pyscf.grad.deriv_eri.int2e_ip1.  With no provider the plain wrapper comes
+    back and nothing about the evaluation changes.
+    '''
+    get_int3c = _int3c_wrapper(mol, auxmol, intor, aosym)
+    wrap = getattr(deriv_eri, 'wrap_int3c', None)
+    if wrap is None:
+        return get_int3c
+    nao = mol.nao
+    naux = auxmol.nao
+    ncomp = 3 if '_ip' in intor else 1
+    nbra = nao*(nao+1)//2 if aosym == 's2ij' else nao*nao
+    return wrap(get_int3c, mol, auxmol, intor, aosym, ncomp*nbra*naux*8)
 
 def _int3c_wrapper(mol, auxmol, intor, aosym):
     ''' Convenience wrapper for getints '''

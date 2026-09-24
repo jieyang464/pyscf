@@ -47,7 +47,7 @@ from pyscf.df.grad.casdm2_util import (solve_df_rdm2, grad_elec_dferi,
 from pyscf.mcscf.addons import StateAverageMCSCFSolver
 
 def grad_elec(mc_grad, mo_coeff=None, ci=None, atmlst=None, verbose=None,
-              eris=None):
+              eris=None, deriv_eri=None):
     mc = mc_grad.base
     with_df = mc.with_df
     if mo_coeff is None: mo_coeff = mc.mo_coeff
@@ -110,12 +110,12 @@ def grad_elec(mc_grad, mo_coeff=None, ci=None, atmlst=None, verbose=None,
         atmlst = range(mol.natm)
     aoslices = mol.aoslice_by_atom()
     de = grad_elec_dferi (mc_grad, mo_cas=mo_cas, dfcasdm2=dfcasdm2, atmlst=atmlst,
-        max_memory=mc_grad.max_memory)[0]
+        max_memory=mc_grad.max_memory, deriv_eri=deriv_eri)[0]
     if mc_grad.auxbasis_response:
         de_aux = vj.aux - vk.aux * .5
         de_aux = de_aux.sum ((0,1)) - de_aux[1,1]
         de_aux += grad_elec_auxresponse_dferi (mc_grad, mo_cas=mo_cas, dfcasdm2=dfcasdm2,
-            atmlst=atmlst, max_memory=mc_grad.max_memory)[0]
+            atmlst=atmlst, max_memory=mc_grad.max_memory, deriv_eri=deriv_eri)[0]
         de += de_aux
     dfcasdm2 = casdm2 = None
 
@@ -184,7 +184,12 @@ class CASSCF_GradScanner(lib.GradScanner):
 class Gradients(casci_grad.Gradients):
     '''Non-relativistic restricted Hartree-Fock gradients'''
 
-    _keys = {'with_df', 'auxbasis_response'}
+    _keys = {'with_df', 'auxbasis_response', 'deriv_eri'}
+
+    # Provider for the derivative integrals, kept on the object so that get_jk
+    # sees it too (see pyscf.df.grad.rhf._cached_int3c).  None: evaluate on
+    # the fly, as PySCF always has.
+    deriv_eri = None
 
     def __init__(self, mc):
         self.with_df = mc.with_df
@@ -202,7 +207,16 @@ class Gradients(casci_grad.Gradients):
         return vj, vk
 
     def kernel (self, mo_coeff=None, ci=None, atmlst=None, verbose=None,
-                eris=None):
+                eris=None, deriv_eri=None):
+        # deriv_eri: density fitting never evaluates (nabla i,j|k,l); the
+        # provider serves its 3-center derivatives instead (see
+        # pyscf.df.grad.rhf._cached_int3c).  It is remembered on the object
+        # because grad_elec reaches get_jk through mc_grad, not through this
+        # argument.
+        if deriv_eri is None:
+            deriv_eri = self.deriv_eri
+        else:
+            self.deriv_eri = deriv_eri
         log = logger.new_logger(self, verbose)
         if atmlst is None:
             atmlst = self.atmlst
@@ -214,7 +228,7 @@ class Gradients(casci_grad.Gradients):
         if self.verbose >= logger.INFO:
             self.dump_flags()
 
-        de = self.grad_elec(mo_coeff, ci, atmlst, log, eris=eris)
+        de = self.grad_elec(mo_coeff, ci, atmlst, log, eris=eris, deriv_eri=deriv_eri)
         self.de = de = de + self.grad_nuc(atmlst=atmlst)
         if self.mol.symmetry:
             self.de = self.symmetrize(self.de, atmlst)

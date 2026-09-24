@@ -25,7 +25,7 @@ from pyscf import df
 from pyscf import mcscf
 from pyscf.ao2mo import _ao2mo
 from pyscf.grad.rhf import GradientsBase
-from pyscf.df.grad.rhf import _int3c_wrapper
+from pyscf.df.grad.rhf import _int3c_wrapper, _cached_int3c
 from pyscf.ao2mo.outcore import balance_partition
 from pyscf.ao2mo.incore import _conc_mos
 from pyscf import __config__
@@ -288,7 +288,7 @@ def gfock_dferi (mc, mo_cas=None, ci=None, dfcasdm2=None, casdm2=None, max_memor
     return gfock
 
 def grad_elec_auxresponse_dferi (mc_grad, mo_cas=None, ci=None, dfcasdm2=None, casdm2=None, atmlst=None,
-                                 max_memory=None, dferi=None, incl_2c=True):
+                                 max_memory=None, dferi=None, incl_2c=True, deriv_eri=None):
     ''' Evaluate the [(P'|ij) + (P'|Q) g_Qij] d_Pij contribution to the electronic gradient, where d_Pij is
     the DF-2RDM obtained by solve_df_rdm2 and g_Qij solves (P|Q) g_Qij = (P|ij). The caller must symmetrize
     if necessary (i.e., (P|Q) d_Qij = (P|kl) d_ijkl <-> (P|Q) d_Qkl = (P|ij) d_ijkl in order to get at Q').
@@ -368,7 +368,7 @@ def grad_elec_auxresponse_dferi (mc_grad, mo_cas=None, ci=None, dfcasdm2=None, c
         int2c = int3c = dferi = None
 
     # Set up 3c part
-    get_int3c = _int3c_wrapper(mol, auxmol, 'int3c2e_ip2', 's2ij')
+    get_int3c = _cached_int3c(deriv_eri, mol, auxmol, 'int3c2e_ip2', 's2ij')
     max_memory -= lib.current_memory()[0]
     blklen = 6*npair
     blksize = int (min (max (max_memory * 1e6 / 8 / blklen, 20), 240))
@@ -390,7 +390,8 @@ def grad_elec_auxresponse_dferi (mc_grad, mo_cas=None, ci=None, dfcasdm2=None, c
     dE = np.array ([dE[:,p0:p1].sum (axis=1) for p0, p1 in auxslices[:,2:]]).transpose (1,0,2)
     return np.ascontiguousarray (dE)
 
-def grad_elec_dferi (mc_grad, mo_cas=None, ci=None, dfcasdm2=None, casdm2=None, atmlst=None, max_memory=None):
+def grad_elec_dferi (mc_grad, mo_cas=None, ci=None, dfcasdm2=None, casdm2=None, atmlst=None, max_memory=None,
+                     deriv_eri=None):
     ''' Evaluate the (P|i'j) d_Pij contribution to the electronic gradient, where d_Pij is the
     DF-2RDM obtained by solve_df_rdm2. The caller must symmetrize (i.e., [(P|i'j) + (P|ij')] d_Pij / 2)
     if necessary.
@@ -446,7 +447,7 @@ def grad_elec_dferi (mc_grad, mo_cas=None, ci=None, dfcasdm2=None, casdm2=None, 
     dfcasdm2 = np.array (dfcasdm2)
 
     # Set up (P|u'v) calculation
-    get_int3c = _int3c_wrapper(mol, auxmol, 'int3c2e_ip1', 's1')
+    get_int3c = _cached_int3c(deriv_eri, mol, auxmol, 'int3c2e_ip1', 's1')
     max_memory -= lib.current_memory()[0]
     blklen = nao*((3*nao) + (3*nmo[1]) + (nset*nmo[1]))
     blksize = int (min (max (max_memory * 1e6 / 8 / blklen, 20), 240))
